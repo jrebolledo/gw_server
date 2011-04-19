@@ -1,4 +1,5 @@
 # -*- coding: utf-8 -*-
+# vim: tabstop=4 expandtab shiftwidth=4 softtabstop=4
 from twisted.internet import reactor,task, threads
 from twisted.internet.protocol import ServerFactory, Protocol, ReconnectingClientFactory
 from twisted.protocols.basic import NetstringReceiver
@@ -51,6 +52,7 @@ MAXQ_GETTIME_METHOD = 27
 RELE_UPDATE_STATES_METHOD = 25
 ASYNC_SYNC_METHOD = 15
 ECHO_METHOD = 70
+RESET_SLAVES = 128
 
 def formatExceptionInfo(maxTBlevel=5):
     cla, exc, trbk = sys.exc_info()
@@ -164,6 +166,7 @@ class arduinoRPC(Protocol):
             self.transport.write(toSend)
         else:
             print 'No autentificado'
+            
     def jsonrpc_gateway_failure(self,id,*args):
         for gw_id in self.factory.references.keys():
             if self.factory.references[gw_id]['handler']() == self:
@@ -219,6 +222,7 @@ class arduinoRPC(Protocol):
 
             dictToSend = threads.deferToThread(syncASYNC,[],**{'device':device,'datetimestamp':datetimestamp,'measurements':measurements,'obj':self,'id':id})
             dictToSend.addCallbacks(genericCallback,genericCallback)
+    
     def jsonrpc_getTime(self,id,*args):
         if self in self.factory.clients:
             now = datetime.datetime.now();
@@ -302,15 +306,30 @@ class rpcFactory(ServerFactory):
         import random
         listas = esperando_ack = 0
         ids = []
-        for i in self.webRequestQueue:
-            if i['state'] == 'WAIT_ACK':
-                ids.append(i['opID'])
+        
+        for index,request in enumerate(self.webRequestQueue):
+            if request.has_key('NOWAIT'):
+                print colored("Send Reset and no wait for response")
                 
-            if i['state'] == 'WAIT':
+                if not (request['gw_id'] in self.references.keys()):
+                    print 'Gateway desconectado ... esperando reconexion'
+                    self.webRequestQueue.pop(index)
+                else:
+                    packetToSend = request['data']
+                    print colored('Sending data (%s) to gateway (%s)'%(packetToSend,request['gw_id']),'magenta')
+                    
+                    self.references[request['gw_id']]['handler']().transport.write(''.join([chr(l) for l in packetToSend]))
+                    self.webRequestQueue.pop(index) # take item out of the array
+                    
+                continue
+            
+            if request['state'] == 'WAIT_ACK':
+                ids.append(request['opID'])
+            if request['state'] == 'WAIT':
                 listas +=1
-            if i['state'] == 'WAIT_ACK':
+            if request['state'] == 'WAIT_ACK':
                 esperando_ack +=1
-
+                
         for index,request in enumerate(self.webRequestQueue):  #request contains, packet, webopID, state
             print colored('Reglas de control lista para enviar (%d)\nReglas de control esperando ACKS (%d) '%(listas, esperando_ack),'yellow')
             now = datetime.datetime.now()
@@ -397,6 +416,12 @@ class djangoProtocol(Protocol):
             #ack to celery
             print colored({'method':'ack','webopID':webopID},'red')
             self.transport.write(json.dumps({'method':'ack','webopID':webopID})) # data puched to queue, when data is laoded and acked by twister a callback with notification will be sent to django to push orbited notification to browser
+
+        elif method == RESET_SLAVES:
+            params.update({'NOWAIT':True})
+            print colored('Slave reset request','red') 
+            self.factory.root.servers['Arduino RPC server'].webRequestQueue.append(params) # params:{gw_id:gw_id1,opID:opID1,data:data1,state:WAIT}
+            self.transport.write(json.dumps({'method':'ack'})) # data puched to queue, when data is laoded and acked by twister a callback with notification will be sent to django to push orbited notification to browser
         else:
             self.connectionLost('Bad request from django')
 
@@ -700,12 +725,12 @@ def syncASYNC(*args,**kwargs):
     
     if newdata.sensor.typeofdevice.name == 'TMP':
         print colored("Temperature packet")
-        newdata.T00 = measurements[0]/2.0
-        newdata.T01 = measurements[1]/2.0
-        newdata.T02 = measurements[2]/2.0
-        newdata.T03 = measurements[3]/2.0
-        newdata.T04 = measurements[4]/2.0
-        newdata.T05 = measurements[5]/2.0
+        newdata.T00 = measurements[0]
+        newdata.T01 = measurements[1]
+        newdata.T02 = measurements[2]
+        newdata.T03 = measurements[3]
+        newdata.T04 = measurements[4]
+        newdata.T05 = measurements[5]
     
     if newdata.sensor.typeofdevice.name == 'LGH':
         print colored("Lighting packet")
@@ -722,7 +747,7 @@ def syncASYNC(*args,**kwargs):
         print colored("%s // %s "%(','.join(['%s'%ord(i) for i in packet]),packet), 'magenta')
     except:
         print colored("%s "%','.join(['%s'%ord(i) for i in packet]), 'magenta')
-        
+    newdata.save()    
     obj.transport.write(packet)
     #except:
     #    print colored('ERROR SYNC ASYNC','yellow')
@@ -833,4 +858,3 @@ djangoservice.setServiceParent(application)
 #reactor.listenTCP(7081, container.servers['Arduino RPC server'])
 
 #reactor.run()
-
