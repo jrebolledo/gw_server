@@ -53,6 +53,7 @@ RELE_UPDATE_STATES_METHOD = 25
 ASYNC_SYNC_METHOD = 15
 ECHO_METHOD = 70
 RESET_SLAVES = 128
+RELAY_RESET = 28
 
 def formatExceptionInfo(maxTBlevel=5):
     cla, exc, trbk = sys.exc_info()
@@ -297,7 +298,7 @@ class rpcFactory(ServerFactory):
         self.webRequestQueue  =   [] #[{gw_id:gw_id1,opID:opID1,data:data1,state:WAIT_ACK, time_requested:timestamp},{gw_id:gw_id2,opID:opID2,data:data2,state:WAIT},...]
         """ task called when busy-queue has some items, retry request to 
         gateway when this has send a method=busy"""
-        self.timeoutRequestToGateway    =    60 #seg
+        self.timeoutRequestToGateway    =    25 #seg
         self.recallWhenGatewayBusy = task.LoopingCall(self.Task_retryRequestToGateway)
         self.recallWhenGatewayBusy.start(2)
         print 'Web request QUEUE checker started'
@@ -422,6 +423,12 @@ class djangoProtocol(Protocol):
             print colored('Slave reset request','red') 
             self.factory.root.servers['Arduino RPC server'].webRequestQueue.append(params) # params:{gw_id:gw_id1,opID:opID1,data:data1,state:WAIT}
             self.transport.write(json.dumps({'method':'ack'})) # data puched to queue, when data is laoded and acked by twister a callback with notification will be sent to django to push orbited notification to browser
+
+        elif method == RELAY_RESET:
+            params.update({'NOWAIT':True})
+            print colored('Relay reset request','red') 
+            self.factory.root.servers['Arduino RPC server'].webRequestQueue.append(params) # params:{gw_id:gw_id1,opID:opID1,data:data1,state:WAIT}
+            self.transport.write(json.dumps({'method':'ack'})) # data puched to queue, when data is laoded and acked by twister a callback with notification will be sent to django to push orbited notification to browser
         else:
             self.connectionLost('Bad request from django')
 
@@ -459,7 +466,7 @@ def Coordinatorlogin(*args,**kwargs):
         dictToSend  = {'results':{'gw_id':coordinator.id},'error':0,'id':id}
         obj.factory.clients.append(obj)
         obj.factory.references[coordinator.id] = {'handler':weakref.ref(obj)}
-        print colored('Coordinador ID %s authenticaded'%(dictToSend['results']['gw_id']),'yellow')
+        print colored('Coordinador ID %s authenticaded (%s)'%(dictToSend['results']['gw_id'],coordinator.section),'yellow')
         coordinator.status = '1'
         coordinator.save()
         #log coordinator event
@@ -579,9 +586,12 @@ def updateRelaysStateonDjango(*args,**kwargs):
     #mula
     po = Devices.objects.filter(pk=int(act_id))
     actuator = Devices.objects.filter(mac=po[0].mac,typeofdevice__type='Actuator')
+    
     if not actuator:
         print colored('Device no existe o no compatible','red')
         return
+    else:
+        print colored('UPDATE RELAY: %s'%actuator[0].coordinator.section,'yellow')
     registers = ast.literal_eval(stripcomments(actuator[0].registers))
     if registers['signals_connected'].has_key('IO1'): #lighting actuator (IO1..IO6)
         lighting_device = actuator[0]
@@ -684,10 +694,15 @@ def sendIDsToGateway(*args,**kwargs):
     all_slots = Devices.objects.filter(mac=mac)
     slots_dict = {}
     type_dict = {'RLS8':2,'MAXQ':1,'TMP':3,'LGH':4}
+    if all_slots:
+        print 'TOD: %s'%all_slots[0].coordinator.section
+        
     for dev in all_slots:
+        
         if not slots_dict.has_key(dev.slots):
             slots_dict[dev.slots] = [] 
         slots_dict[dev.slots].append([dev.id,type_dict[dev.typeofdevice.name]])
+    
     num_slots = len(slots_dict)
     ids = []
     f = []
@@ -724,7 +739,7 @@ def syncASYNC(*args,**kwargs):
     newdata.slot = newdata.sensor.slots
     
     if newdata.sensor.typeofdevice.name == 'TMP':
-        print colored("Temperature packet")
+        print colored("Temperature packet: %s"%newdata.sensor.coordinator.section)
         newdata.T00 = measurements[0]
         newdata.T01 = measurements[1]
         newdata.T02 = measurements[2]
@@ -733,7 +748,7 @@ def syncASYNC(*args,**kwargs):
         newdata.T05 = measurements[5]
     
     if newdata.sensor.typeofdevice.name == 'LGH':
-        print colored("Lighting packet")
+        print colored("Lighting packet: %s"%newdata.sensor.coordinator.section)
         newdata.L00 = measurements[0]
         newdata.L01 = measurements[1]
         newdata.L02 = measurements[2]
@@ -762,6 +777,7 @@ def syncMAXQ(*args,**kwargs):
         
         newdata = Measurements()
         newdata.sensor = Devices.objects.get(pk=int(device))
+        print 'MAXQ: %s'%newdata.sensor.coordinator.section
         corrections = ast.literal_eval(stripcomments(newdata.sensor.board.corrections))
         newdata.datetimestamp = datetimestamp
         newdata.type = 'Sensor'
